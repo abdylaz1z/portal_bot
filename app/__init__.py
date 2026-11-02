@@ -1,0 +1,1 @@
+"""ОшТУ Telegram bot application."""

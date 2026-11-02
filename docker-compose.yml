@@ -1,0 +1,133 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-oshtu_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-oshtu_bot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    profiles: ["scalable"]
+    restart: always
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  oshtu-bot:
+    build: .
+    restart: always
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-oshtu_bot}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-oshtu_bot}
+      SQLITE_DATABASE_URL: sqlite+aiosqlite:////app/data/oshtu_bot.db
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+
+  bot-worker:
+    build: .
+    profiles: ["scalable"]
+    restart: always
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-oshtu_bot}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-oshtu_bot}
+      REDIS_URL: redis://redis:6379/0
+      BOT_MODE: webhook
+      BOT_ROLE: worker
+      WEBHOOK_PUBLIC_URL: ${WEBHOOK_PUBLIC_URL:-}
+      WEBHOOK_PATH: ${WEBHOOK_PATH:-/telegram/webhook}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+      WEBHOOK_WORKER_PORT: 8080
+    expose:
+      - "8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  bot-scheduler:
+    build: .
+    profiles: ["scalable"]
+    restart: always
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-oshtu_bot}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-oshtu_bot}
+      REDIS_URL: redis://redis:6379/0
+      BOT_MODE: webhook
+      BOT_ROLE: scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  webhook-gateway:
+    build: .
+    profiles: ["scalable"]
+    restart: always
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      WEBHOOK_PATH: ${WEBHOOK_PATH:-/telegram/webhook}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+      WEBHOOK_GATEWAY_PORT: 8081
+      WEBHOOK_WORKER_PORT: 8080
+    expose:
+      - "8081"
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["python", "-m", "app.webhook_gateway"]
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["scalable"]
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      WEBHOOK_DOMAIN: ${WEBHOOK_DOMAIN:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      webhook-gateway:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:

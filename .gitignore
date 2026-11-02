@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+data/*
+logs/*
+!data/.gitkeep
+!logs/.gitkeep
+playwright-report/
+.aider*

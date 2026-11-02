@@ -1,0 +1,3 @@
+{$WEBHOOK_DOMAIN} {
+    reverse_proxy webhook-gateway:8081
+}
