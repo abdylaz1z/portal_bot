@@ -24,6 +24,31 @@ from app.handlers import create_router
 from app.keyboards import login_menu
 from app.portal import PortalClient, PortalUnavailable
 
+# --- ГЛОБАЛЬНЫЙ ОБЪЕКТ ДЛЯ VERCEL ---
+app = web.Application()
+
+bot = Bot(token=settings.bot_token) if settings.bot_token else None
+database = Database()
+dispatcher = Dispatcher()
+
+if bot:
+    dispatcher.include_router(create_router())
+    dispatcher["db"] = database
+
+    SimpleRequestHandler(
+        dispatcher,
+        bot,
+        secret_token=settings.webhook_secret,
+        handle_in_background=False,
+    ).register(app, path=settings.webhook_path)
+
+    async def health(_: web.Request) -> web.Response:
+        return web.json_response({"status": "ok"})
+
+    app.router.add_get("/healthz", health)
+    setup_application(app, dispatcher, bot=bot)
+# -----------------------------------
+
 
 def validate_webhook_settings() -> None:
     if settings.bot_mode != "webhook":
@@ -87,7 +112,6 @@ async def run() -> None:
             diagnose=False,
         )
 
-    database = Database()
     await database.initialize()
     redis: Redis | None = None
     storage = None
@@ -109,7 +133,7 @@ async def run() -> None:
             )
     portal = PortalClient()
     await portal.start()
-    bot = Bot(token=settings.bot_token)
+    
     if settings.bot_mode == "webhook" and settings.bot_role == "worker":
         storage = RedisStorage.from_url(
             settings.redis_url,
@@ -117,9 +141,9 @@ async def run() -> None:
             data_ttl=24 * 60 * 60,
         )
         isolation = RedisEventIsolation.from_url(settings.redis_url)
-    dispatcher = Dispatcher(storage=storage, events_isolation=isolation)
-    dispatcher.include_router(create_router())
-    dispatcher["db"] = database
+    
+    dispatcher.storage = storage
+    dispatcher.events_isolation = isolation
     dispatcher["portal"] = portal
 
     scheduler = AsyncIOScheduler(timezone=ZoneInfo("Asia/Bishkek"))
@@ -158,6 +182,7 @@ async def run() -> None:
     scheduler.start()
     registry_task: asyncio.Task | None = None
     runner: web.AppRunner | None = None
+    
     if settings.bot_role == "worker" and settings.bot_mode == "webhook":
         assert redis is not None
         worker_ip = socket.gethostbyname(socket.gethostname())
@@ -173,19 +198,6 @@ async def run() -> None:
 
         registry_task = asyncio.create_task(register_worker())
 
-        async def health(_: web.Request) -> web.Response:
-            await redis.ping()
-            return web.json_response({"status": "ok"})
-
-        app = web.Application()
-        SimpleRequestHandler(
-            dispatcher,
-            bot,
-            secret_token=settings.webhook_secret,
-            handle_in_background=False,
-        ).register(app, path=settings.webhook_path)
-        app.router.add_get("/healthz", health)
-        setup_application(app, dispatcher, bot=bot)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", settings.webhook_worker_port)
@@ -201,6 +213,7 @@ async def run() -> None:
         logger.info("Portal session scheduler started")
     else:
         logger.info("ОшТУ bot started in polling mode")
+        
     try:
         if settings.bot_role == "worker" and settings.bot_mode == "polling":
             await dispatcher.start_polling(
